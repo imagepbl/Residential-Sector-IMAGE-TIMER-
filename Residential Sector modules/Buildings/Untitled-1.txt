@@ -1,0 +1,347 @@
+
+!Learning rate of improvement of the building's shell (insulation). Learning rate is applied from 2002 onward, since values of this year were found in literature. 
+!For the learning process, the whole word is taken in account. So, capacities refer to added global capacities.
+!ExpIndex = - 0.2,                                               ! Experience index, usually depicted as b. Values between -0.074 and - 0.515 (Progress Ratio between 0.95 and 0.7). This is an input to the model. Equal to -0.2 under SSP2 (middle road scenario).
+
+Capacity_in = SWITCH (t >= 2002 ?
+                 LSUM(i=4 to TURQ, LSUM(R=1 to 26, Total_Renov_Stock[R,i](2001))) +                       ! Renovaions plus isulation use in new buildings (= total insulation use) until 2002. Expressed in m^2.
+                 LSUM(i=4 to TURQ, LSUM(R=1 to 26, NewBuild_ins_Stock[R,i](2001))),            
+              ELSE 0);
+             
+Capacity_fin = LSUM(i=4 to TURQ, LSUM(R=1 to 26, LAST(Total_Renov_Stock[R,i],0))) +                      ! Renovaions plus isulation use in new buildings (= total insulation use) until t(current run). Expressed in m^2.
+               LSUM(i=4 to TURQ, LSUM(R=1 to 26, LAST(NewBuild_ins_Stock[R,i],0)));                                   
+
+EXPIN = -0.2 * MAX(0,(2030-t))/15  + ExpIndex * MIN(15,(t-tscen))/15 ; 
+               
+Learning_factor(t) = SWITCH (t > 2002 AND t <= tscen ?                        
+                        POW((Capacity_fin / Capacity_in), (-0.2)),
+                             t > tscen ?
+                        POW((Capacity_fin / Capacity_in), (EXPIN)),    
+                     ELSE 1); 
+
+!************************** DESCRIPTION OF MODEL BUILDINGS ****************************************
+!Description of a prototype house. These dimensions, analogies and properties are used to describe the average global building shape. 
+!Inner surfaces are not accounted for insulation appliance (internal walls, floors between 2 appartments, etc.). 
+     
+Floor_to_FS[R,i] = ExFloor, R=1 to NR27, i=1 to TURQ;
+    
+Roof_to_FS[R,i] = ExRoof, R=1 to NR27, i=1 to TURQ;
+
+Wall_to_FS[R,i] = SWITCH(HHFloor[R,i] > EPS ?	
+			         ExWall *						               ! Exposed Wall Fraction
+			         (1-Window_perc) *		 			           ! Non-window fraction
+			         ((2 * BH * SQRT(HHFloor[R,i]/BSide)) +        ! m^2 Wall area on short side
+			         (2 * BH * BSide *SQRT(HHFloor[R,i]/BSide)))   ! m^2 Wall area on long side
+			         / HHFloor[R,i]                                ! Average floorspace of a household 
+		          ELSE 0.5), R=1 to NR27, i =1 to TURQ;              
+
+Windows_to_FS[R,i] = SWITCH( HHFloor[R,i] > EPS ?
+				        (Wall_to_FS[R,i]/(1-Window_perc) * HHFloor[R,i] * 0.2)  ! 20% of the total wall area. 
+						/ HHFloor[R,i],                        
+			         ELSE 0.0),
+                     R=1 to NR27, i=1 to TURQ; 
+
+! Total suface areas (m^2)
+SurfaceArea[R,i,1]	= Wall_to_FS[R,i] * Floorspace_total[R,i], R = 1 TO 26, i = 4 TO TURQ;
+SurfaceArea[R,i,2]	= Roof_to_FS[R,i] * Floorspace_total[R,i], R = 1 TO 26, i = 4 TO TURQ;
+SurfaceArea[R,i,3]	= Floor_to_FS[R,i] * Floorspace_total[R,i], R = 1 TO 26, i = 4 TO TURQ;
+SurfaceArea[R,i,4]	= Windows_to_FS[R,i] * Floorspace_total[R,i], R = 1 TO 26, i = 4 TO TURQ;
+
+SurfaceArea[R,1,AR]	= LSUM(i = 4 TO TURQ, SurfaceArea[R,i,AR]), R = 1 TO 26, AR = 1 TO SUR;
+SurfaceArea[R,2,AR]	= LSUM(i = 4 TO 8, SurfaceArea[R,i,AR]), R = 1 TO 26, AR = 1 TO SUR;
+SurfaceArea[R,3,AR]	= LSUM(i = 9 TO TURQ, SurfaceArea[R,i,AR]), R = 1 TO 26, AR = 1 TO SUR;
+SurfaceArea[NRC,i,AR] = LSUM(R = 1 TO 26, SurfaceArea[R,i,AR]), i = 1 TO TURQ, AR = 1 TO SUR;
+         
+!************************** MARIGNAL USEFUL ENERGY INTENSITY OF DIFFERENT BUILDING TYPES ****************************************
+!Useful energy intensity of new buildings. 
+!U-values of Europe for 2002 are found and used in this model. The values are provided for 3 climate zones, Warm, Cold, and Moderate depended on the areas HDD.
+!Climate zones are linked to a specific HDD (heating degree day) value. For more precesion an interpolation through the climate zones takes place improving the U-Values for each region. Same idea is also applied to the costs.
+
+L1[AR,j] = (U_Values[2,AR,j] - U_Values[3,AR,j])/(3000-1800), AR=1 to SUR, j=1 to REN; 
+L2[AR,j] = (U_Values[1,AR,j] - U_Values[2,AR,j])/(4500-3000), AR=1 to SUR, j=1 to REN; 
+ 
+L11[AR,j] = (Costs_UValues[2,AR,j] - Costs_UValues[3,AR,j])/(3000-1800), AR=1 to SUR, j=1 to REN; 
+L22[AR,j] = (Costs_UValues[1,AR,j] - Costs_UValues[2,AR,j])/(4500-3000), AR=1 to SUR, j=1 to REN; 
+            
+UValue[R,AR,j] = SWITCH (t <= tscen ?                                                                                ! Improvement on U-Values are assumed. AEEI projects the yearly improvements on insulation material and techniques. 
+                    SWITCH ( HDD[R,13] <= 3000 ?                                                                    ! Interpolation between hot and moderate climate zone.
+                       (L1[AR,j]*(MAX(1800,HDD[R,13])-1800) + U_Values[3,AR,j]) * AEEI_factor,                   
+                    ELSE  
+                       (L2[AR,j]*(MIN(4500,HDD[R,13])-3000) + U_Values[2,AR,j]) * AEEI_factor),    
+                 ELSE                                                                                               ! Again, improvement of 0.75% on U-Values are assumed from 2020 onward.                
+                    SWITCH ( HDD[R,13] <= 3000 ?                        
+		               (L1[AR,j]*(MAX(1800,HDD[R,13])-1800) + U_Values[3,AR,j]) * POW((1-AEEI),(t-tscen)),       		            
+                    ELSE  
+                       (L2[AR,j]*(MIN(4500,HDD[R,13])-3000) + U_Values[2,AR,j]) * POW((1-AEEI),(t-tscen)))),   
+                 R=1 to NR27, AR=1 to SUR, j=1 to REN; 
+                  
+CostUValue[R,AR,j] = SWITCH ( HDD[R,13] <= 3000 ?                         ! Same for costs
+                        (L11[AR,j]*(MAX(1800,HDD[R,13])-1800) + Costs_UValues[3,AR,j]) * Learning_factor,       ! A learning factor is applied for values after 2002. Until then it is equal to 1.                               
+                     ELSE  
+                        (L22[AR,j]*(MIN(4500,HDD[R,13])-3000) + Costs_UValues[2,AR,j]) * Learning_factor),
+                     R=1 to NR27, AR=1 to SUR, j=1 to REN;
+ 
+ 
+Q_coef[R,i,j] = SWITCH( Floorspace_total[R,i] > EPS ? 
+			       LSUM(AR = 1 TO SUR, UValue[R,AR,j] * SurfaceArea[R,i,AR]) / Floorspace_total[R,i]
+				ELSE 0.0), 
+				R = 1 TO NRC, i = 1 TO TURQ, j = 1 TO REN;
+
+UEint_per_level[R,i,j] = Q_coef[R,i,j] * 86.4, R=1 to NR27, i=1 to TURQ, j=1 to REN;                        ! Conversion of Q_coef to Usuful Energy Intensity. W/m^2/K to KJ/m^2/HDD.
+
+Insulation_Invest_costs[R,i,j] = SWITCH( Floorspace_total[R,i] > EPS ? 
+						            LSUM(AR = 1 TO SUR, CostUValue[R,AR,j] * SurfaceArea[R,i,AR]) / Floorspace_total[R,i]
+					             ELSE 0.0), 
+							     R = 1 TO NRC, i = 1 TO TURQ, j = 1 TO REN;
+									  
+!*********************** Insulation in New Buildings *******************************************
+
+!*********************** TOTAL COSTS PER INSULATION LEVEL AND BUILDING TYPE *******************************************
+!New building additional costs (due to more insulation) and market shares.
+
+crf[R,i] = SWITCH((1-POW((1+CDR_I[R,i]),-RLT)) > EPS ? 
+		      CDR_I[R,i]/(1-POW((1+CDR_I[R,i]),-RLT))
+	       ELSE 0.1),
+		   R=1 to NR27, i=1 to TURQ;                                                        ! CDR1= Discount rate. The dwelling lifetime is biger than the insulation/renovation lifetime (RLT) for all regions. Not the case for the renovations later on the model.   	
+
+NewBuild_Capital_Cost[R,i,j] = Insulation_Invest_costs[R,i,j] *(1-Insu_subs) *crf[R,i] *crf_factor,                         ! Annualized original investment ($/m^2). With this equation the costs are discounted through the investment lifetime.
+                               R=1 to NR27, i=4 to TURQ, j=1 to REN;                              
+
+! Heating costs             
+Fuel_Cost_new[R,i,j] = SWITCH (t=1971 ?
+                          LSUM(EC = 1 TO NECN, FuelPrice_heating[R,EC] *                                                        ! For t= 1971 it gives 0 (probably due to non-existent SpaceHeatingTotal(1970)). 
+                          LAST(hot.SpaceHeatingTOTAL_TURQ[R,i,EC],0)),
+                       ELSE 
+                          LSUM(EC = 1 TO NECN, FuelPrice_heating[R,EC] *                                                       ! Fuel cost $/m^2.
+                          LAST(hot.SpaceHeatingTOTAL_TURQ[R,i,EC],0)) *                              
+                          UEint_per_level[R,i,j] / LAST(UEintHeat[R,i],0)/BS[R,i]),                                  ! Fuel costs differ for the different insulation levels. $/m^2.
+                       R=1 to NR27, i=4 to TURQ , j=1 to REN;
+
+! Cooling Costs
+Cooling_Fuel_Cost_new[R,i,j] = SWITCH (t=1971 ?
+                                  LSUM(k = 2 TO 3, appl.FuelPrice_Final[R,i] * 0.0036 *                                       ! For t= 1971 it gives 0 (probably due to non-existent SpaceHeatingTotal(1970)). 
+                                  LAST(appl.ApplEnUse[R,i,k],0) * PoP_q[R,i] ),
+                               ELSE 
+                                  LSUM(k = 2 TO 3, appl.FuelPrice_Final[R,i] * 0.0036 *                                       ! Fuel cost $/m^2.
+                                  LAST(appl.ApplEnUse[R,i,k],0)) * PoP_q[R,i] *                              
+                                  UEint_per_level[R,i,j] / LAST(UEintHeat[R,i],0)/BS[R,i]),                         ! Fuel costs differ for the different insulation levels. $/m^2.
+                               R=1 to NR27, i=4 to TURQ , j=1 to REN;
+
+! Premium Factor
+	! Premium factors -> 0 as CTax -> 1000 AND REN -> 6
+PremiumFactor[R,j] = PremFacInsulation[R,j] * (
+			         1 - (InsulPremDiscount(j) * InsulCTaxDiscount(CarbonTax[R])) 
+					 ), R = 1 TO NR27, j = 1 TO REN;     
+
+! Total costs including heating and cooling
+NewBuild_Cost[R,i,j] = NewBuild_Capital_Cost[R,i,j] +                 ! Total costs per insulation level (and region/turq). $/m^2.     
+                       Fuel_Cost_new[R,i,j] + 
+                       Cooling_Fuel_Cost_new[R,i,j] +
+                       PremiumFactor[R,j],
+                       R=1 to NR27, i=4 to TURQ, j=1 to REN;        
+
+! Diagnostics on cost components
+CostComponent[R,i,j,1] = NewBuild_Capital_Cost[R,i,j], R = 1 TO 26, i = 4 TO TURQ, j = 1 TO REN;
+CostComponent[R,i,j,2] = Fuel_Cost_new[R,i,j], R = 1 TO 26, i = 4 TO TURQ, j = 1 TO REN;
+CostComponent[R,i,j,3] = Cooling_Fuel_Cost_new[R,i,j], R = 1 TO 26, i = 4 TO TURQ, j = 1 TO REN;
+
+CostComponent[R,1,j,k] = LAVG(i = 4 TO TURQ, CostComponent[R,i,j,k]), R = 1 TO 26, j = 1 TO REN, k = 1 TO 3;
+CostComponent[R,2,j,k] = LAVG(i = 4 TO 8, CostComponent[R,i,j,k]), R = 1 TO 26, j = 1 TO REN, k = 1 TO 3;
+CostComponent[R,3,j,k] = LAVG(i = 9 TO TURQ, CostComponent[R,i,j,k]), R = 1 TO 26, j = 1 TO REN, k = 1 TO 3;
+
+CostComponent[NR27,i,j,k] = LAVG(R = 1 TO 26, CostComponent[R,i,j,k]), i = 1 TO TURQ, j = 1 TO REN, k = 1 TO 3;
+
+CostComponent[R,i,j,4] = LSUM(k = 1 TO 3, CostComponent[R,i,j,k]), R = 1 TO 27, i = 1 TO TURQ, j = 1 TO REN;
+
+CostFrac[R,i,j,k] = SWITCH(CostComponent[R,i,j,4] > EPS ? 
+				       CostComponent[R,i,j,k] / CostComponent[R,i,j,4]
+			        ELSE 0), R = 1 TO NR27, i = 1 TO TURQ, j = 1 TO REN, k = 1 TO 3;
+
+!*********************** MARKET SHARES OF INSULATION LEVELS (NEW BUILDINGS) *******************************************
+NewBuild_Cost_floor[R,i] = MAX(EPS , LMIN(j=1 to REN, NewBuild_Cost[R,i,j])),            ! Picks the minimum cost. $/m^2.
+                           R=1 to NR27, i=4 to TURQ;  
+
+NewBuild_rel_Cost[R,i,j] = NewBuild_Cost[R,i,j] / NewBuild_Cost_floor[R,i],           ! Calculates the relative costs between insulation options.
+                           R=1 to NR27, i=4 to TURQ, j=1 to REN;
+
+MS_new[R,i,j] = SWITCH(t > tscen AND FlagInsulation = 0 ?
+			       LAST(MS_new[R,i,j],1/REN)
+		        ELSE
+			       EXP(-LogitPar * NewBuild_rel_Cost[R,i,j])                                ! Calculates the market shares of buildings with differnet insulation levels.
+                   /LSUM(k=1 to REN, EXP(-LogitPar * NewBuild_rel_Cost[R,i,k]))
+                   ),
+				   R=1 to NR27, i=4 to TURQ, j= 1 to REN;
+
+!*********************** NEW CAPITAL PER INSULATION LEVEL *******************************************
+NewBuild[R,i,j] = MS_new[R,i,j] * Tot_New_Build[R,i], R=1 to NR27, i=4 to TURQ, j= 1 to REN;                               
+
+NewBuild[R,1,j] = LSUM(i=4 to TURQ, NewBuild[R,i,j]), R=1 to NR27, j= 1 to REN;
+NewBuild[R,2,j] = LSUM(i=4 to TURQ-5, NewBuild[R,i,j]), R=1 to NR27, j= 1 to REN;
+NewBuild[R,3,j] = LSUM(i=9 to TURQ, NewBuild[R,i,j]), R=1 to NR27, j= 1 to REN;                            
+NewBuild[27,i,j] = LSUM(R=1 to 26, NewBuild[R,i,j]), i=1 to TURQ, j=1 to REN;
+
+Investments_NewBuild[R,i] = LSUM(j=1 to REN, NewBuild[R,i,j] * Insulation_Invest_costs[R,i,j])/1000000000, R=1 to NR27, i=1 to TURQ;
+Investments_NewBuild[27,i] = LSUM(R=1 to 26, Investments_NewBuild[R,i]), i=1 to TURQ;
+
+NewBuild_ins_Stock[R,i] = LAST(NewBuild_ins_Stock[R,i],0) + 
+                          LSUM(j=2 to REN, NewBuild[R,i,j]), R=1 to NR27, i=1 to TURQ;
+
+						   
+!*********************** Insulation in Renovations *******************************************
+			   
+!************************** SAVINGS PER RENOVATION LEVEL  ****************************************
+!For renovation option 1 (REN =1), no renovation takes place. Costs are set as zero.
+
+Energy_Savings[R,i,j,Y] = SWITCH (UEIntHeat_new_wa[R,i](Y+1970) > 0 ?
+                               1 - UEint_per_level[R,i,j] / UEIntHeat_new_wa[R,i](Y+1970),
+                             ELSE 0), R=1 to NR27, i=1 to TURQ ,j=2 to REN, Y= 1  to t - RLT - 1970;
+
+Energy_Savings[R,i,1,Y] = 0, R=1 to NR27, i=1 to TURQ, Y= 1  to t - RLT - 1970;      
+
+                   
+!************************** DETERMINE POTENTIAL RENOVATION STOCKS  ****************************************
+!Suitable for renovation are the buildings that were not built within the last RLT (30) years (not 'new buildings') and the buildings that have not already been renovated in the last RLT years.      
+!The year limits  t > (Y+1970)+RLT AND t < (Y+1970)+Dwel_LT[R] are taken mainly to reduce calculation time. Buildings outside this timelin can not renovate (too old or too new).
+
+! First get fraction of building deemed appropriate for renavation based on thier income
+! This is an ad-hoc behavioural parameter assuming that poorer households are less likely to chose to renovate (note: CDR used later only affects the renovation level, NOT the willingness to renovate)
+REAL	Multiplier[NRC,TURQ](t);
+Multiplier[R,i]	= SWITCH( t <= tscen ? 
+			MIN(1,Suit_Renov_Mult_in(PCOpcT_ppp[R,i]) * RenovCTaxPremium(CarbonTax[R]))
+		ELSE	(Convergence * MIN(1,Suit_Renov_Mult_scen(PCOpcT_ppp[R,i]) * RenovCTaxPremium(CarbonTax[R]))) + ((1-Convergence)*Multiplier[R,i](tscen))
+		), R = 1 TO NRC, i = 1 TO TURQ;
+
+! Buildings built in year Y
+Suit_Renov[R,i,Y] = SWITCH(FlagRenovation = 1 ?
+				SWITCH ( t >(Y+1970)+RLT AND t <(Y+1970)+Dwel_LT[R] ?                                                                                 
+					Multiplier[R,i] * (
+					MAX(0, Tot_New_Build[R,i](Y+1970) - LSUM(j=2 to REN, LAST(Renov_Stock[R,i,j,Y],0)))
+					),                                                                                                                          ! The LSUM(j=2 to REN, LAST(Renov_Stock[R,i,j,BT,Y],0))) makes sure that the buildings are renovated once. 
+				ELSE 0)
+			ELSE 0), R=1 to NR27, i=1 to TURQ, Y=1 to YEAR;
+
+! Buildings built before 1971
+Suit_Renov_Add[R,i] = SWITCH(FlagRenovation = 1 ?
+				MAX( 0, 
+				MIN( BS_0[R,i] * 0.25,
+				SWITCH (t <= (RLT + 1971) ?                                                                                                     ! Additional suitable floorspace for renovation. For the years before RLT+1971 (usually 2001) the model cannot see the suitable buildings, as it cannot look so far in the past (values before 1971).
+					Multiplier[R,i] * (
+					(Dwel_LT[R]-(RLT+1)) * Decom_BD[R,i] - LSUM(j=2 to REN, LAST(Renov_Add_Stock[R,i,j],0))
+					),                                                                                                                          ! Suitable are the new buildings of Dwel_LT[R]-(RLT+1) years (years before 1971), so the Decom_BD[R,i] (see its definition). Also 
+					
+				ELSE                                                                         
+				    	Multiplier[R,i] * (
+				    	MAX(0,(Dwel_LT[R]-(RLT+1)) - (t - (RLT + 1971))) * Decom_BD[R,i] - LSUM(j=2 to REN, LAST(Renov_Add_Stock[R,i,j],0)))))
+				    	),       ! Adds the residences build before 1971 (when it is necessary).         
+				ELSE 0), R=1 to NR27, i=1 to TURQ;                                        
+
+Suit_share[R,i] = LSUM(y=1 TO 130, Suit_Renov[R,i,Y])/BS[R,i], R=1 to NR27, i=1 to TURQ;
+
+!************************** RENOVATION COSTS  ****************************************
+RLT_Renov[R,Y] = SWITCH (t < (Y+1970)+Dwel_LT[R] ?
+                    MIN (RLT, (Y+1970)+Dwel_LT[R] - t),
+                 ELSE 0),                                                                          
+                 R= 1 to NR27, Y= 1 to YEAR;
+
+crf_Renov[R,i,Y] = SWITCH (t < (Y+1970)+Dwel_LT[R] ?                                                                      ! We only care about the values before the year of construction (Y) plus the lifetime.
+			          SWITCH((1-POW((1+CDR_I[R,i]),- RLT_Renov[R,Y])) > EPS ?
+                         CDR_I[R,i]/(1-POW((1+CDR_I[R,i]),-RLT_Renov[R,Y])),
+                   	  ELSE 0.1)
+                   ELSE 0.1),                                                                  
+                   R= 1 to NR27, i=1 to TURQ, Y= 1 to YEAR; 
+
+Renov_Capital_Cost[R,i,j,Y] = SWITCH (t < (Y+1970)+Dwel_LT[R] ?                                                           ! Same as crf_renov.
+                                 Insulation_Invest_costs[R,i,j] * (1-Insu_subs) * crf_Renov[R,i,Y],
+                              ELSE 0),                                                                  
+                              R=1 to NR27, i=4 to TURQ, j=1 to REN, Y=1 to YEAR;   
+
+Renov_Cost[R,i,j,Y] = SWITCH (Y = 1 OR t >(Y+1970)+RLT AND t <(Y+1970)+Dwel_LT[R] ?  
+                         Renov_Capital_Cost[R,i,j,Y] +  
+                         Fuel_Cost_new[R,i,j] + 
+                         Cooling_Fuel_Cost_new[R,i,j] + 
+                         PremiumFactor[R,j] 
+                      ELSE 0), R=1 to NR27, i=4 to TURQ, j=1 to REN, Y=1 to YEAR;        
+
+!************************** MARKET SHARE OF RENOVATION LEVELS  ****************************************
+Renov_Cost_floor[R,i,Y] = SWITCH (Y = 1 OR t >(Y+1970)+RLT AND t <(Y+1970)+Dwel_LT[R] ?  
+                             MAX(1 , LMIN(j=1 to REN, Renov_Cost[R,i,j,Y])),
+                          ELSE 0), R=1 to NR27, i=4 to TURQ, Y=1 to YEAR;  
+
+Renov_rel_Cost[R,i,j,Y] = SWITCH (Y = 1 OR t >(Y+1970)+RLT AND t <(Y+1970)+Dwel_LT[R] ? 
+                             Renov_Cost[R,i,j,Y] / Renov_Cost_floor[R,i,Y],
+                          ELSE 0), R=1 to NR27, i=4 to TURQ, j=1 to REN, Y=1 to YEAR;
+
+MS_renov[R,i,j,Y] = SWITCH (Y = 1 OR t >(Y+1970)+RLT AND t <(Y+1970)+Dwel_LT[R] ?                                               ! Market shares of renovation levels.
+                 EXP(-LogitPar * Renov_rel_Cost[R,i,j,Y])
+                 /LSUM(k=1 to REN, EXP(-LogitPar * Renov_rel_Cost[R,i,k,Y])),
+              ELSE 0), R=1 to NR27, i=4 to TURQ, j= 1 to REN, Y=1 to YEAR; 
+!************************** ACTUAL RENOVATIONS  ****************************************
+Renov[R,i,j,Y] = SWITCH (t >(Y+1970)+RLT AND t <(Y+1970)+Dwel_LT[R] ?                                                     ! Renovtions per level and year of construction. m^2.
+                    MS_renov[R,i,j,Y] * Suit_Renov[R,i,Y],
+                 ELSE 0), R=1 to NR27, i=4 to TURQ, j= 1 to REN, Y=1 to YEAR;   
+              
+Renov[R,1,j,Y] = LSUM(i=4 to TURQ, Renov[R,i,j,Y]), R=1 to NR27, j= 1 to REN, Y=1 to YEAR;
+Renov[R,2,j,Y] = LSUM(i=4 to TURQ-5, Renov[R,i,j,Y]), R=1 to NR27, j= 1 to REN, Y=1 to YEAR;
+Renov[R,3,j,Y] = LSUM(i=9 to TURQ, Renov[R,i,j,Y]), R=1 to NR27, j= 1 to REN, Y=1 to YEAR;
+Renov[27,i,j,Y] = LSUM(R=1 to 26, Renov[R,i,j,Y]), i=1 to TURQ, j=1 to REN, Y=1 to YEAR;
+
+Renov_Add[R,i,j] = SWITCH (t < 1973 ?
+                      MS_renov[R,i,j,1] * Suit_Renov_Add[R,i] ,                                                             ! For the residents build before 1971 we assume the same data as of the residents of 1971 (same fuel costs etc.). 
+                           t = 1973 ?
+                      LAST(MS_renov[R,i,j,1],0) * Suit_Renov_Add[R,i] , 
+                   ELSE 
+                      MS_renov[R,i,j,1](1972) * Suit_Renov_Add[R,i]) , 
+                   R=1 to NR27, i=4 to TURQ, j=1 to REN;
+
+Renov_Add[R,1,j] = LSUM(i=4 to TURQ, Renov_Add[R,i,j]), R=1 to NR27, j= 1 to REN;
+Renov_Add[R,2,j] = LSUM(i=4 to TURQ-5, Renov_Add[R,i,j]), R=1 to NR27, j= 1 to REN;
+Renov_Add[R,3,j] = LSUM(i=9 to TURQ, Renov_Add[R,i,j]), R=1 to NR27, j= 1 to REN;
+Renov_Add[27,i,j] = LSUM(R=1 to 26, Renov_Add[R,i,j]), i=1 to TURQ, j=1 to REN;
+
+Renov_all[R,i,j] = LSUM(Y=1 to YEAR, Renov[R,i,j,Y]) + Renov_Add[R,i,j],                             ! For j=1 we actually have non renovated buildings.
+                   R=1 to NR27, i=1 to TURQ, j=1 to REN;               
+
+!************************** RENOVATION INDICATORS  ****************************************
+! Stocks
+Total_Renov[R,i] = LSUM(j=2 to REN, Renov_all[R,i,j]), R=1 to NR27, i=1 to TURQ;
+
+Renov_Rate[R,i] = SWITCH (BS[R,i]>0 ?
+                     Total_Renov[R,i]/BS[R,i]
+                  ELSE 0), R=1 to NR27, i=1 to TURQ;
+
+Renov_Rate_ave[R,i] = 	SWITCH(t <= tscen ? 
+                           Renov_Rate[R,i] 
+			            ELSE 
+						   LAVG(j=1 to t-tscen, NLAST(Renov_Rate[R,i],j,0))), 
+						R = 1 TO NR27, i = 1 TO TURQ;
+
+Renov_Rate_ave_hist[R,i] = SWITCH(t=2016 ?
+                              LAVG(j=1 to 45, NLAST(Renov_Rate[R,i],j,0))
+                           ELSE 0), R=1 to NR27, i=1 to TURQ;
+
+Renov_Stock[R,i,j,Y] = LAST(Renov_Stock[R,i,j,Y],0) + Renov[R,i,j,Y],                                ! For the first run (year 1971), we assume that the existing renovation will be 1% of the building stock.
+                       R=1 to NR27, i=1 to TURQ, j=2 to REN, Y = 1 TO YEAR;                                        
+
+Renov_Add_Stock[R,i,j] = LAST(Renov_Add_Stock[R,i,j],0) + Renov_Add[R,i,j],                          ! For the first run (year 1971), we assume that the existing renovation will be 1% of the building stock.
+                         R=1 to NR27, i=1 to TURQ, j=2 to REN;
+                        
+Total_Renov_Stock[R,i] = SWITCH ( t=1971 ?
+                            BS_0[R,i]*0.5/100,
+                         ELSE
+                            LAST(Total_Renov_Stock[R,i],0) +
+                            LSUM(j=2 to REN, Renov_all[R,i,j])), 
+					     R=1 to NR27, i=1 to TURQ;
+
+! Investments
+Investments_RenovBuild[R,i] = LSUM(j=1 to REN, Renov_all[R,i,j] * Insulation_Invest_costs[R,i,j])/1000000000, R=1 to NR27, i=4 to TURQ;
+
+Investments_RenovBuild[R,1] = LSUM (i=4 to 13, Investments_RenovBuild[R,i]), R = 1 TO 26;
+Investments_RenovBuild[R,2] = LSUM (i=4 to 8, Investments_RenovBuild[R,i]), R = 1 TO 26;
+Investments_RenovBuild[R,3] = LSUM (i=9 to TURQ, Investments_RenovBuild[R,i]), R = 1 TO 26;
+Investments_RenovBuild[27,i] = LSUM(R=1 to 26, Investments_RenovBuild[R,i]), i=1 to TURQ;
+
+Investments_Total[R,i] = Investments_NewBuild[R,i] + Investments_RenovBuild[R,i], 
+                         R=1 to NR27, i=1 to TURQ;
+Investments_Total_pc[R,i]	= SWITCH(Pop_q[R,i] > EPS ?
+					             (Investments_Total[R,i] * 1000000) / Pop_q[R,i]
+				              ELSE 0), R = 1 TO NR27, i = 1 TO TURQ;

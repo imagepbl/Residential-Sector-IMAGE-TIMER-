@@ -3,43 +3,56 @@ import pandas as pd
 import re as re
 import os.path
 
+from scipy.interpolate import interp1d # for load_mym()
+
 from csv import Sniffer as Sniffer
 from string import whitespace as whitespace
 
 LINESEP = "\n"
 
 # ............................................................................ #
-def process_header(line):
-    """
+class Header():
 
-    """
-    raw_data = ""
-    # > the header line contains "[d1,d2,...,dn](t) = [t1", with n [di]
-    #   dimensions, where the time dimension "(t)" is optional.
-    # >> define [endmarker] of variable dependent on time-dependency
-    has_time = True if "(t)" in line else False
+    datatypes = {"real": float, "integer": int}
     
-    # >> parse the [di] dimension values
-    # TODO: check if this works
-    dim_match = re.search(r"\[(.*?)\]", line).group(1)
-    if dim_match is not None:
-        # dim_match = dim_match.group(1)
-        dim_match = re.split(",", dim_match)
-        dims = [int(d) for d in dim_match]
-    else:
-        dims = [1]
-    # >> the data values length includes 1 year value if [has_time]
-    data_length = np.prod(dims) + 1 if has_time else np.prod(dims)
+    def __init__(self, line):
+        self.line = line
+        self.dimensions = [1]
+        self.has_domain = False
+        self.has_time = False
+        
+        self.process()
     
-    # > the following "[" and "t1" are only there in the case of a
-    #   time-dependent variable; t1 can also be on the next line(s).
-    # >> parse the remainder of the line
-    if has_time:
-        start_array = line.rfind("[") + 1
-        if line[start_array:].isdigit():
-            raw_data = line[start_array:]
+    def process(self):
+        """
+        Extracts metadata from the header `line`.
+        
+        The header line contains "datatype name[d1,d2,...,dn](t) = [t1",
+        with n [di] dimensions, datatype is equal to either "real" or "integer", 
+        where the time dimension ["(t)"] is optional.
+        """
+        domain_match = re.search(r"\((.*)\)", self.line)
+        if domain_match:
+            self.has_domain = True
+            self.domain = domain_match.group(1)
+            self.has_time = True if self.domain == "t" else False
+        
+        # > parse the [di] dimension values
+        dim_match = re.search(r"\[(.*)\]", self.line)
+        if dim_match:
+            self.dimensions = [int(d) for d in dim_match.group(1).split(",")]
 
-    return has_time, dims, data_length, raw_data
+        # > a block of data values includes 1 time value if `has_time`
+        self.data_block_size = np.prod(self.dimensions)
+        if self.has_domain:
+            self.data_block_size = self.data_block_size + 1
+
+        # > establish Python data type
+        mym_datatype = self.line.split()[0].lower()
+        self.datatype = self.datatypes[mym_datatype]
+        
+        # > parse the data on the remainder of the line
+        self.raw_data = self.line.partition("=")[-1].strip(whitespace + "[")
 # ............................................................................ #
 
 
@@ -67,57 +80,125 @@ def read_mym(filename, path=""):
     time : np.array
         vector with time values, with time.shape = [t,1]
     """
+    # Open file, extract header, and read data
+    filepath = os.path.join(path, filename)
 
-    # Open file and read data
-    filename = os.path.join(path, filename)
+    content = []
+    metadata = []
+
+    with open(filepath, "r") as mym_file:
+        for line in mym_file:
+            line, _, comment = line.partition("!")
+            line = line.lstrip().replace("\n", " ")
+            if not line and not content:
+                metadata.append(comment)
+            elif line:
+                if not content:
+                    header = Header(line)
+                    content.append(header.raw_data)
+                else:
+                    content.append(line)
     
-    with open(filename, "r") as mym_file:
-        header = []
-        line = mym_file.readline().strip(whitespace + ",")
-        while line[0] == "!":
-            header.append(line)
-            line = mym_file.readline().strip(whitespace + ",")
-        # > process header and put data on header line into string 
-        has_time, dimensions, data_length, raw_data = process_header(line)
-        content = mym_file.read().replace("\n", " ").rstrip("];" + whitespace)
-    
+    content = "".join([s for s in content if s])
+
     # Process data
-    # > transform to numpy array, using the csv.Sniffer to find the delimiter.
-    # > `first_chunk` is a large enough string for the sniffer to find
-    #   the delimiter and small enough to be fast.
+    # `first_chunk` results in a large enough string for the `Sniffer` to find the delimiter and
+    #  small enough to be fast.
     first_chunk = 64
     delimiters = "".join([",", whitespace])
     mym_format = Sniffer().sniff(content[:first_chunk], delimiters=delimiters)
-    raw_data = mym_format.delimiter.join([s for s in [raw_data, content] if s])
-    raw_data = np.fromstring(raw_data, sep=mym_format.delimiter)
+    
+    raw_data = np.fromstring(content, dtype=header.datatype,
+                             sep=mym_format.delimiter)
 
-    # > find the desired dimensions, where `time_length` == 1 for
-    #   time-independent data 
-    if raw_data.size % data_length == 0:
-        time_length = int(raw_data.size / data_length)
-        raw_dimensions = (time_length,data_length)
-        target_dimensions = tuple([time_length] + dimensions)
-    else:
-        raise RuntimeError("file dimensions are parsed incorrectly")
+    # find the desired dimensions, where `domain_size == 1` for time-independent data
+    domain_size, dimension_error = divmod(raw_data.size, header.data_block_size)
+    if dimension_error:
+        raise RuntimeError("File dimensions are parsed incorrectly.")
 
-    # > reshape data in two steps to split off time vector, while reflecting
-    #   original dimensions, where `time = data[:,0]`
+    # reshape `raw_data` in two steps to enable splitting off time vector
+    raw_dimensions = (domain_size, header.data_block_size)
     data = np.reshape(raw_data, raw_dimensions)
-    if has_time:
-        time, data = np.split(data,[1], axis=1)
-        data = np.reshape(data, target_dimensions)
-        time = np.squeeze(time)
+    
+    if header.has_domain:
+        # split off time vector, where `time == data[:,0]` and reshape
+        # time vector can represent a general domain dimension `if not header.has_time`
+        target_dimensions = (domain_size, *header.dimensions)
+        time, data = np.split(data, [1], axis=1)
+        data = data.reshape(target_dimensions)
+        time = time.reshape(domain_size)
+
+        # time entries should be strictly increasing integers
+        domain_is_integer = all(t.is_integer() for t in time) if header.has_time else True
+        domain_increases = all(time[:-1] < time[1:]) if domain_size > 1 else True
+        domain_ok = domain_is_integer and domain_increases
+        if not domain_ok:
+            raise RuntimeError("Domain dimension does not consist of strictly increasing numbers.")
+
         return data, time
     else:
-        return data
+        return data.reshape(header.dimensions)
 # ............................................................................ #
 
 
-def stringify(array, indent=4):
+def load_mym(filename, path="", time=None, extrapolate=""):
+    """
+    Load a MyM data file according to specifications. Return numpy array.
+    
+    The MyM data file should contain a single time-dependent variable. 
+    
+    Parameters
+    ----------
+    filename : string
+        name of the file to be read in, gives `data_in` and `time_in`
+    path : string, optional
+        path to the filename, either relative or absolute
+    time : np.array
+        time array to which the MyM data should be cast
+    extrapolate : {"", "fill"}
+        determines whether `data` will be extrapolated for `time` values
+        outside the range `time_in` where `data_in` is defined.
+        If `extrapolate` == "fill", `data` will be extended based on the
+        closest defined values of `data_in`. 
+    
+    Returns
+    -------
+    header : string
+        contains comment lines and variable specification, the last line should
+        end with '[a1,...,an](t) = ['
+    data : np.array
+        contains the data as a [t,a1,...,an] shaped numpy matrix
+    """
+
+    if time is None:
+        time_start, time_stop, time_step = (1970, 2100, 5)
+        time = np.arange(time_start, time_stop + time_step, step=time_step)
+
+    try:
+        data_in, time_in = read_mym(filename, path=path)
+    except TypeError:
+        print("Data read from [{}] is not time-dependent".format(filename))
+        raise
+
+    # TODO: check whether `time` has values outside of `time_in`,
+    #       while `extrapolate` is off? {mvdb}
+    # TODO: check whether we want to change interpolation method {mvdb}
+    f = interp1d(time_in, data_in, axis=0, kind="linear")
+    if extrapolate == "fill":
+        time_bounds = min(time[time >= time_in[0]]), max(time[time <= time_in[-1]])
+        bounds = f(time_bounds)
+        f = interp1d(time_in, data_in, axis=0, kind="linear", fill_value=bounds)
+    
+    data = f(time)
+
+    return data
+
+
+def stringify(array, indent=4, sep=","):
     """
     Generate data string from array. Return string.
     """
-    formatter = lambda number: "{:14s}".format("{:.4f},".format(number))
+    formatter = lambda number: "{:14s}".format("{:.4f}{}".format(number, sep))
     s = ""
     for row in array:
         line = [" " * indent]
@@ -157,7 +238,7 @@ def shape_data_table(data_table, dimensions, table):
     return data_table
 
 
-def print_mym(data, years=None, name="", table="long", comment=""):
+def print_mym(data, years=None, sep=",", name="", table="long", comment=""):
     """
     Print `data` in MyM data format string. Return string.
 
@@ -175,15 +256,16 @@ def print_mym(data, years=None, name="", table="long", comment=""):
         a DataFrame is used for a time-dependent variable, where each column
         contains the data for a single year, for a time-independent variable a
         Series is expected. A numpy array can contain both types of variables.
-    years : array_like
-        contains time values associated with `data` when data is a numpy array,
-        optional
+    years : array_like, optional
+        contains time values associated with `data` when data is a numpy array
+    sep : str, default=","
+        character(s) used as separator of `data` elements
     name : string
         name of the variable contained in `data`
     table : {"long", "wide"}
         ways of formatting MyM `data` in string
-    comment : string
-        description of `data`, optional
+    comment : string, optional
+        description of `data`
 
     Returns
     -------
@@ -200,18 +282,19 @@ def print_mym(data, years=None, name="", table="long", comment=""):
         print("The [table] argument is not specified correctly, it should be"
               " either 'long' (default) or 'wide', using default.")
 
-    # Generate [dimensions] and [datatype]
-    # > [dimensions] is cast into a list for the correct string representation
+    # Generate `dimensions` and `datatype`
+    # `dimensions` is cast into a list for the correct string representation
     if isinstance(data, (pd.DataFrame, pd.Series)):
         try:
-            # Clean [data] for known MultiIndex issues
+            # Clean `data` for known MultiIndex issues
             data.index = data.index.remove_unused_levels()
             if all([level in data.index.names for level in ["image_region","image_region_index"]]):
                 data.index = data.index.droplevel(level="image_region_index")
             dimensions = list(data.index.levshape)
-            #  Check dimensionality
-            # > [data] should have a size that is equal to the product of its
-            #   dimensions, otherwise [data] has duplicates or is incomplete.
+            
+            # Check dimensionality
+            # `data` should have a size that is equal to the product of its
+            # dimensions, otherwise `data` has duplicates or is incomplete.
             if not np.prod(dimensions) == data.shape[0]:
                 raise Exception("Data for [{}] variable has an inconsistent"
                                 " format. Expected [{}] index entries, got"
@@ -237,17 +320,17 @@ def print_mym(data, years=None, name="", table="long", comment=""):
     mym_datatype = "real" if np.issubdtype(datatype, np.floating) else "integer"
     time = "(t) = [" if years is not None else " ="
     dimension_string = str(dimensions) if np.prod(dimensions) > 1 else ""
-    header = comment + "{} {}{}{}{}".format(mym_datatype, name, dimensions, time, LINESEP)
+    header = comment + "{} {}{}{}{}".format(mym_datatype, name, dimension_string, time, LINESEP)
 
     # Print data
     data_string = [header]
     if years is None:
-        data_string.append(stringify(shape_data_table(data, dimensions, table)))
+        data_string.append(stringify(shape_data_table(data, dimensions, table), sep=sep))
     else:
         for year in years:
-            data_string.append("{},{}".format(year, LINESEP))
+            data_string.append("{}{}{}".format(year, sep, LINESEP))
             data_block = get_yearly_data_table(data, dimensions, year, years, table)
-            data_string.append(stringify(data_block))
+            data_string.append(stringify(data_block, sep=sep))
 
     # Close MyM data array
     # > last number in array should not be followed by a comma
@@ -260,24 +343,57 @@ def print_mym(data, years=None, name="", table="long", comment=""):
 # ............................................................................ #
 
 
-def write_mym(data, years=None, table="long", variable_name="data",
-        filename=None, filepath=None, comment=""):
+def write_mym(
+        data, years=None, filename=None, path=None, sep=",", variable_name="data", table="long",
+        comment=""):
     """
-    Write mym `data_string` to file.
+    Write mym `data` to file.
+
+    Parameters
+    ----------
+    data : pandas.DataFrame, pandas.Series or numpy.array
+        a DataFrame is used for a time-dependent variable, where each column
+        contains the data for a single year, for a time-independent variable a
+        Series is expected. A numpy array can contain both types of variables.
+    years : array_like, optional
+        contains time values associated with `data` when data is a numpy array
+    filename : str, optional
+        name of the file to which `data` will be written
+    path : str, optional
+        path where `filename` will be created, `path` must exist
+    sep: str, default=","
+        character(s) used as separator of `data` elements
+    variable_name : string, optional
+        name of the variable contained in `data`
+    table : {"long", "wide"}
+        ways of formatting MyM `data` array in string
+    comment : string, optional
+        description of `data` printed at the top of the file
+
+    Returns
+    -------
+    data_string : string
+        `data` in MyM string format
+
+    See also
+    --------
+    print_mym : Print `data` in MyM data format string.
+    read_mym : Read MyM data from file
     """
-    data_string = print_mym(data, years=years, name=variable_name, table=table,
-                            comment=comment)
+    data_string = print_mym(
+        data, years=years, sep=sep, name=variable_name, table=table, comment=comment
+        )
 
     filename = variable_name + ".dat" if not filename else filename
-    filepath = os.path.join(filepath, filename) if filepath else filename
-    with open(filename, "w+") as mym_file:
+    filepath = os.path.join(path, filename) if path else filename
+
+    with open(filepath, "w+") as mym_file:
         mym_file.write(data_string)
 
 
 if __name__ == "__main__":
-
-    read_mym("floorspace.out")
-
+    test = read_mym("elast_coeff.dat")
+    test2 = read_mym("households.out")
     print("Performing pym integration tests.")
     dimensions = (4,5,6)
     data = np.random.rand(*dimensions)

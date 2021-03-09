@@ -1,0 +1,7 @@
+! real main.ckwt.ctax_fac (main.ckwt.ctax); label= ctax_fac
+real main.ctax_fac[1](t) = [
+0,            1,            
+500,          0.75,          
+1000,         0.66,          
+4000,         0.5
+];

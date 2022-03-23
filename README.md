@@ -1,7 +1,7 @@
 # Residential-Building-Sector-IMAGE/TIMER-
 
 # Description
-This repository includes the residential building sector sub-modules of TIMER (i.e., the energy model of IMAGE). These modules are translated from MyM to Python to become oper source material, and in cases are slightly modified to improve the documentation, documentation, and performance. 
+This repository includes the residential building sector sub-modules of TIMER (i.e., the energy model of IMAGE). These modules are translated from MyM to Python to become oper source material, and in cases are slightly modified to improve the documentation, and performance. 
 
 # Installation 
 1. Python package. 
